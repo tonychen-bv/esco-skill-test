@@ -346,18 +346,20 @@ Step 3 — assign a realistic schedule to every item:
 Return ONLY a JSON object with this exact structure (no markdown, no extra text):
 {{
   "experience": [
-    {{"action": "...", "addresses": ["exact skill label", ...], "schedule": "Month X–Y"}},
+    {{"title": "3–5 word summary", "action": "...", "addresses": ["exact skill label", ...], "schedule": "Month X–Y"}},
     ...
   ],
   "social": [
-    {{"action": "...", "addresses": ["exact skill label", ...], "schedule": "Month X–Y"}},
+    {{"title": "3–5 word summary", "action": "...", "addresses": ["exact skill label", ...], "schedule": "Month X–Y"}},
     ...
   ],
   "formal": [
-    {{"action": "...", "addresses": ["exact skill label", ...], "schedule": "Month X–Y"}},
+    {{"title": "3–5 word summary", "action": "...", "addresses": ["exact skill label", ...], "schedule": "Month X–Y"}},
     ...
   ]
 }}
+
+"title" must be a concise 3–5 word label that captures the essence of the action (e.g. "Lead cross-functional API project", "Shadow a senior architect", "Complete AWS Solutions Architect cert"). Used as a header and in the schedule timeline.
 
 ---
 
@@ -399,6 +401,357 @@ Return ONLY a JSON object with this exact structure (no markdown, no extra text)
         return {"experience": [], "social": [], "formal": []}
 
 
+# ── PDF Export ───────────────────────────────────────────────────────────────
+def generate_pdf_report(
+    name: str,
+    current_occ: dict | None,
+    target_occ: dict,
+    user_matched_skills: list[dict],
+    gap_essential: list[dict],
+    plan: dict,
+    target_is_inferred: bool = False,
+) -> bytes:
+    """Generate a styled Career Development Plan PDF using reportlab."""
+    import io as _io
+    from datetime import date
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        PageBreak, KeepTogether, HRFlowable,
+    )
+
+    # ── Palette ───────────────────────────────────────────────────────────────
+    C_NAVY   = colors.HexColor("#1e3a5f")
+    C_EXP    = colors.HexColor("#27ae60")
+    C_SOC    = colors.HexColor("#e67e22")
+    C_FORM   = colors.HexColor("#2980b9")
+    C_GAP    = colors.HexColor("#c0392b")
+    C_LIGHT  = colors.HexColor("#f4f6f9")
+    C_BORDER = colors.HexColor("#d0d7e3")
+    C_MUTED  = colors.HexColor("#7f8c8d")
+    C_WHITE  = colors.white
+
+    PAGE_W, PAGE_H = A4
+    MARGIN = 2 * cm
+    W = PAGE_W - 2 * MARGIN  # usable width
+
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=MARGIN, bottomMargin=MARGIN,
+    )
+
+    # ── Styles ────────────────────────────────────────────────────────────────
+    base = getSampleStyleSheet()
+    def sty(name, **kw):
+        return ParagraphStyle(name, parent=base["Normal"], **kw)
+
+    s_title    = sty("title",   fontSize=22, textColor=C_WHITE, leading=28, alignment=TA_LEFT)
+    s_subtitle = sty("sub",     fontSize=10, textColor=C_WHITE, leading=14)
+    s_h2       = sty("h2",      fontSize=13, textColor=C_NAVY,  spaceBefore=14, spaceAfter=6, leading=18)
+    s_body     = sty("body",    fontSize=9,  leading=14, spaceAfter=4)
+    s_small    = sty("small",   fontSize=8,  textColor=C_MUTED, leading=12)
+    s_tag_exp  = sty("tag_exp", fontSize=7,  textColor=C_EXP)
+    s_tag_soc  = sty("tag_soc", fontSize=7,  textColor=C_SOC)
+    s_tag_form = sty("tag_form",fontSize=7,  textColor=C_FORM)
+    s_chip_lbl = sty("chip",    fontSize=8,  textColor=C_WHITE, alignment=TA_CENTER)
+    s_gap_type = sty("gtype",   fontSize=8,  textColor=C_GAP,   spaceBefore=6, spaceAfter=2)
+
+    def colored_header_table(text_para, bg_color, padding=12):
+        t = Table([[text_para]], colWidths=[W])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,-1), bg_color),
+            ("TOPPADDING",    (0,0), (-1,-1), padding),
+            ("BOTTOMPADDING", (0,0), (-1,-1), padding),
+            ("LEFTPADDING",   (0,0), (-1,-1), 14),
+            ("RIGHTPADDING",  (0,0), (-1,-1), 14),
+        ]))
+        return t
+
+    def schedule_chip(schedule_text, color):
+        t = Table([[Paragraph(f"  {schedule_text}  ", s_chip_lbl)]], colWidths=[3.2*cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), color),
+            ("TOPPADDING",    (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+            ("LEFTPADDING",   (0,0), (-1,-1), 4),
+            ("RIGHTPADDING",  (0,0), (-1,-1), 4),
+        ]))
+        return t
+
+    story = []
+
+    # ── Page 1: Cover ─────────────────────────────────────────────────────────
+    today = date.today().strftime("%B %d, %Y")
+    current_label = current_occ["preferredLabel"] if current_occ else "—"
+    target_label  = target_occ["preferredLabel"]
+    inferred_note = " (inferred)" if target_is_inferred else ""
+
+    # Hero banner
+    hero_inner = Table([
+        [Paragraph("Career Development Plan", s_title)],
+        [Paragraph(f"{name}  ·  Generated {today}", s_subtitle)],
+    ], colWidths=[W - 28])
+    story.append(colored_header_table(hero_inner, C_NAVY, padding=20))
+    story.append(Spacer(1, 16))
+
+    # Role transition card
+    role_table = Table(
+        [[
+            Table([
+                [Paragraph("Current Role", s_small)],
+                [Paragraph(f"<b>{current_label}</b>", s_body)],
+            ], colWidths=[W * 0.43]),
+            Paragraph("<b>→</b>", sty("arrow", fontSize=18, alignment=TA_CENTER, textColor=C_MUTED)),
+            Table([
+                [Paragraph(f"Target Role{inferred_note}", s_small)],
+                [Paragraph(f"<b>{target_label}</b>", s_body)],
+            ], colWidths=[W * 0.43]),
+        ]],
+        colWidths=[W * 0.45, W * 0.10, W * 0.45],
+    )
+    role_table.setStyle(TableStyle([
+        ("VALIGN",  (0,0), (-1,-1), "MIDDLE"),
+        ("ALIGN",   (1,0), (1,-1),  "CENTER"),
+        ("BACKGROUND", (0,0), (0,-1), C_LIGHT),
+        ("BACKGROUND", (2,0), (2,-1), colors.HexColor("#eaf4ff")),
+        ("BOX",     (0,0), (0,-1), 0.5, C_BORDER),
+        ("BOX",     (2,0), (2,-1), 0.5, C_BORDER),
+        ("TOPPADDING",    (0,0), (-1,-1), 10),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 10),
+        ("LEFTPADDING",   (0,0), (-1,-1), 12),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 12),
+    ]))
+    story.append(role_table)
+    story.append(Spacer(1, 20))
+
+    # ── Skill type color map (mirrors Streamlit UI) ───────────────────────────
+    SKILL_TYPE_COLORS = {
+        "knowledge":        colors.HexColor("#4e9af1"),
+        "skill/competence": colors.HexColor("#27ae60"),
+        "language":         colors.HexColor("#9b59b6"),
+        "others":           colors.HexColor("#888888"),
+    }
+
+    def skill_table(skills_by_type: dict[str, list[str]]) -> Table:
+        """Render skill groups as a two-column badge table: [type badge | pill row]."""
+        TYPE_ORDER = ["knowledge", "skill/competence", "language", "others"]
+        sorted_types = sorted(
+            skills_by_type.items(),
+            key=lambda kv: TYPE_ORDER.index(kv[0]) if kv[0] in TYPE_ORDER else 99,
+        )
+        rows = []
+        for skill_type, labels in sorted_types:
+            type_color = SKILL_TYPE_COLORS.get(skill_type, SKILL_TYPE_COLORS["others"])
+            type_cell = Paragraph(
+                f"<b>{skill_type.title()}</b>",
+                sty(f"stc_{skill_type}", fontSize=7.5, textColor=C_WHITE, alignment=TA_CENTER),
+            )
+            # Skills as small pill table (3 per row)
+            pill_rows = []
+            row_buf = []
+            for label in labels:
+                row_buf.append(
+                    Paragraph(label, sty("pill", fontSize=7.5, textColor=colors.black))
+                )
+                if len(row_buf) == 3:
+                    pill_rows.append(row_buf)
+                    row_buf = []
+            if row_buf:  # pad last row
+                while len(row_buf) < 3:
+                    row_buf.append(Paragraph("", s_body))
+                pill_rows.append(row_buf)
+
+            pill_col_w = (W * 0.74) / 3
+            pills_tbl = Table(pill_rows, colWidths=[pill_col_w] * 3)
+            pill_style = [
+                ("FONTSIZE",      (0,0), (-1,-1), 7.5),
+                ("TOPPADDING",    (0,0), (-1,-1), 3),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                ("LEFTPADDING",   (0,0), (-1,-1), 5),
+                ("RIGHTPADDING",  (0,0), (-1,-1), 5),
+                ("BOX",           (0,0), (-1,-1), 0.4, C_BORDER),
+                ("INNERGRID",     (0,0), (-1,-1), 0.2, C_BORDER),
+                ("BACKGROUND",    (0,0), (-1,-1), C_LIGHT),
+                ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+            ]
+            pills_tbl.setStyle(TableStyle(pill_style))
+            rows.append([type_cell, pills_tbl])
+
+        tbl = Table(rows, colWidths=[W * 0.22, W * 0.78])
+        tbl_style = [
+            ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+            ("TOPPADDING",    (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+            ("LEFTPADDING",   (0,0), (0,-1),  6),
+            ("RIGHTPADDING",  (0,0), (0,-1),  6),
+            ("ROWBACKGROUNDS", (0,0), (-1,-1), [C_LIGHT, C_WHITE]),
+        ]
+        # Color each type badge cell individually
+        for row_idx, (skill_type, _) in enumerate(sorted_types):
+            c = SKILL_TYPE_COLORS.get(skill_type, SKILL_TYPE_COLORS["others"])
+            tbl_style.append(("BACKGROUND", (0, row_idx), (0, row_idx), c))
+        tbl.setStyle(TableStyle(tbl_style))
+        return tbl
+
+    # Skills you bring
+    story.append(HRFlowable(width=W, color=C_BORDER))
+    story.append(Paragraph("Skills You Bring", s_h2))
+    if user_matched_skills:
+        by_type: dict[str, list] = {}
+        for m in user_matched_skills:
+            t = (m.get("skillType") or "others").lower().strip()
+            by_type.setdefault(t, []).append(m["esco_label"])
+        story.append(skill_table(by_type))
+    else:
+        story.append(Paragraph("No matched skills found.", s_small))
+    story.append(Spacer(1, 16))
+
+    # Essential skill gaps
+    story.append(HRFlowable(width=W, color=C_BORDER))
+    story.append(Paragraph("Essential Skill Gaps to Close", s_h2))
+    if gap_essential:
+        by_type2: dict[str, list] = {}
+        for s in gap_essential:
+            t = (s.get("skillType") or "others").lower().strip()
+            by_type2.setdefault(t, []).append(s["skillLabel"])
+        story.append(skill_table(by_type2))
+    else:
+        story.append(Paragraph("No essential skill gaps — your profile already covers all requirements.", s_small))
+
+    story.append(PageBreak())
+
+    # ── Page 2: Gantt + Plan ──────────────────────────────────────────────────
+    story.append(Paragraph("12-Month Development Schedule", s_h2))
+
+    # Build item list for Gantt
+    SECTION_META = [
+        ("experience", "Experience (70%)", C_EXP),
+        ("social",     "Social (20%)",     C_SOC),
+        ("formal",     "Formal (10%)",     C_FORM),
+    ]
+    gantt_items = []
+    for sec_key, sec_label, sec_color in SECTION_META:
+        for item in plan.get(sec_key, []):
+            schedule = item.get("schedule", "")
+            m = re.search(r"(\d+)[^\d]+(\d+)", schedule)
+            start = int(m.group(1)) if m else 1
+            end   = int(m.group(2)) if m else 1
+            end   = max(start, min(end, 12))
+            title = item.get("title") or item.get("action", "")[:40]
+            gantt_items.append({
+                "label": title,
+                "section": sec_label[:3],
+                "start": start, "end": end,
+                "color": sec_color,
+            })
+
+    if gantt_items:
+        LABEL_W  = W * 0.38
+        MONTH_W  = (W * 0.62) / 12
+        ROW_H    = 18
+
+        # Header row: label + M1…M12
+        header_row = [Paragraph("<b>Activity</b>",
+                                sty("gh", fontSize=7, textColor=C_WHITE))]
+        for i in range(1, 13):
+            header_row.append(Paragraph(f"<b>M{i}</b>",
+                                        sty("gm", fontSize=7, textColor=C_WHITE, alignment=TA_CENTER)))
+
+        gantt_data = [header_row]
+        span_cmds  = [
+            ("BACKGROUND", (0,0), (-1,0), C_NAVY),
+            ("GRID",       (0,0), (-1,-1), 0.3, C_BORDER),
+            ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
+            ("TOPPADDING",    (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+            ("LEFTPADDING",   (0,0), (-1,-1), 4),
+            ("RIGHTPADDING",  (0,0), (-1,-1), 4),
+        ]
+
+        for r_idx, gi in enumerate(gantt_items, start=1):
+            row = [Paragraph(gi["label"],
+                             sty("gl", fontSize=6.5, textColor=colors.black))]
+            for m in range(1, 13):
+                if gi["start"] <= m <= gi["end"]:
+                    row.append(Paragraph("", s_body))
+                else:
+                    row.append("")
+            gantt_data.append(row)
+
+            # Colored bar span
+            col_start = gi["start"]      # 1-based col index (label=0, M1=1)
+            col_end   = gi["end"]
+            if col_start != col_end:
+                span_cmds.append(("SPAN",       (col_start, r_idx), (col_end, r_idx)))
+            span_cmds.append(("BACKGROUND", (col_start, r_idx), (col_end, r_idx), gi["color"]))
+            # Alternate row background for non-bar cells
+            bg = C_LIGHT if r_idx % 2 == 0 else C_WHITE
+            for m_col in range(0, 13):
+                if not (col_start <= m_col <= col_end):
+                    span_cmds.append(("BACKGROUND", (m_col, r_idx), (m_col, r_idx), bg))
+
+        col_widths = [LABEL_W] + [MONTH_W] * 12
+        gantt_table = Table(gantt_data, colWidths=col_widths, rowHeights=ROW_H)
+        gantt_table.setStyle(TableStyle(span_cmds))
+        story.append(gantt_table)
+
+    story.append(Spacer(1, 24))
+
+    # ── Development Plan sections ─────────────────────────────────────────────
+    tag_styles = {"experience": s_tag_exp, "social": s_tag_soc, "formal": s_tag_form}
+
+    for sec_key, sec_label, sec_color in SECTION_META:
+        items = plan.get(sec_key, [])
+        if not items:
+            continue
+
+        story.append(KeepTogether([
+            colored_header_table(
+                Paragraph(f"<b>{sec_label}</b>",
+                          sty(f"sh_{sec_key}", fontSize=12, textColor=C_WHITE)),
+                sec_color, padding=10,
+            ),
+            Spacer(1, 8),
+        ]))
+
+        for item in items:
+            schedule  = item.get("schedule", "")
+            title     = item.get("title", "")
+            action    = item.get("action", "")
+            addresses = item.get("addresses", [])
+            t_style   = tag_styles[sec_key]
+
+            s_item_title = sty(
+                f"it_{sec_key}", fontSize=10, textColor=C_NAVY,
+                spaceBefore=4, spaceAfter=3, leading=14,
+            )
+            block = [
+                schedule_chip(f"  {schedule}", sec_color),
+                Spacer(1, 5),
+            ]
+            if title:
+                block.append(Paragraph(f"<b>{title}</b>", s_item_title))
+            block.append(Paragraph(action, s_body))
+            if addresses:
+                block.append(Paragraph(
+                    "  ".join(f"[ {a} ]" for a in addresses),
+                    t_style,
+                ))
+            block.append(Spacer(1, 10))
+            story.append(KeepTogether(block))
+
+        story.append(Spacer(1, 8))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="ESCO Skill Gap Analyzer", page_icon="🎯", layout="wide")
 st.title("🎯 ESCO Skill Gap Analyzer")
@@ -419,57 +772,60 @@ with st.expander("📖 How to use this tool", expanded=False):
     st.markdown("""
 ## Welcome to the ESCO Skill Gap Analyzer
 
-This tool helps you understand where you stand today and what it takes to reach your next career goal — powered by the **ESCO v1.2.1** European Skills/Competences taxonomy and **Azure OpenAI**.
+This tool helps you understand what skills you need to reach your target role — and delivers a concrete, personalised development plan to get there. Powered by the **ESCO v1.2.1** European Skills/Competences taxonomy and **Azure OpenAI**.
 
 ---
 
 ### ✍️ How to fill in the inputs
 
-You can use **either or both** input fields. Each mode produces different output:
+You can use **either or both** input fields:
 
 | Mode | What you fill in | What you get |
 |------|-----------------|--------------|
-| **Current only** | Your current role & skills | System infers your most natural next career step, then runs a full gap analysis toward it |
+| **Current only** | Your current role & skills | System infers your most natural next career step, then produces a full gap analysis and plan toward it |
 | **Target only** | The role you want to reach | A complete skill roadmap starting from scratch — no current profile needed |
-| **Both** | Current + target | A precise gap analysis comparing where you are to where you want to be |
+| **Both** | Current + target | Gap analysis between your existing skills and the target role, with a tailored development plan |
 
-You can type a free-text description **or upload a PDF / DOCX file** (e.g. your résumé for Current, a job description for Target).
+You can type a free-text description **or upload a PDF / DOCX file** (e.g. your résumé for Current, a job description for Target). The more detail you provide, the more accurate the results.
 
 ---
 
 ### 📦 What each output section means
 
 **🔍 Extracted Information**
-What the AI parsed from your input — your current job title, extracted skills list, and/or target title. Review this to confirm the AI understood your input correctly.
+What the AI parsed from your input — your current job title and extracted skills list, and/or your target title. Review this to confirm the AI understood your input correctly before proceeding.
 
-**🏷 Current / Target Role Match**
-Your input is matched against all ~3,000 ESCO occupations using semantic similarity. The best-matching ESCO occupation is shown with its official definition, description, alternative labels, and scope note.
+**🏷 Role Match**
+Your input is matched against ~3,000 ESCO occupations using semantic similarity. The best-matching occupation is shown with its official definition, description, alternative labels, and scope note.
 
-**📋 Skills for [Role]**
-The official ESCO skill list for each matched occupation, split into **Essential** (must-have) and **Optional** (nice-to-have), further grouped by skill type (Knowledge / Skill & Competence / Language).
+**📋 Skills for Target Role**
+The official ESCO skill list for your matched target occupation, split into **Essential** (must-have) and **Optional** (nice-to-have), grouped by skill type (Knowledge / Skill & Competence / Language).
 
 **✅ Skills You Already Have**
-Your extracted skills matched against the full ESCO skill vocabulary (threshold ≥ 0.50 cosine similarity). Shows which ESCO skill each of your skills maps to, and whether it appears in your current role, target role, or both.
+Your extracted skills matched against the full ESCO skill vocabulary (cosine similarity ≥ 0.50). Each matched skill shows its ESCO label, similarity score, and whether it is required by the target role (**Required ✅**).
 
-> ⚠️ Scores are computed on full ESCO skill embeddings (label + description + scope note), so even an exact name match will score below 1.0.
+> ⚠️ Similarity is computed on full ESCO skill embeddings (label + description + scope note), not just the skill name — so even an exact name match will score below 1.0. Multiple ESCO skills above the threshold may be matched per extracted skill; duplicates are deduplicated by URI, keeping the highest score.
 
 **❌ Skill Gaps**
-Skills required by your current and/or target role that are **not** found in your matched profile — the actual gap you need to close. Grouped by Essential / Optional → role source → skill type.
+Target role skills **not** covered by your matched profile — the gap to close. Grouped by Essential / Optional → skill type.
 
 **🗺 Development Plan**
-A personalised **70-20-10** learning plan to close your essential skill gaps:
-- 🛠 **Experience (70%)** — on-the-job projects and stretch assignments
-- 🤝 **Social (20%)** — mentors, communities, peer learning
-- 📚 **Formal (10%)** — courses, certifications, books, platforms
+A personalised **70-20-10** plan calibrated to your inferred seniority level, scheduled across a 12-month horizon:
+- 🛠 **Experience (70%)** — 2 substantial on-the-job assignments (one per half-year), outcome-oriented with clear deliverables
+- 🤝 **Social (20%)** — up to 3 competency-focused peer learning or mentorship engagements
+- 📚 **Formal (10%)** — up to 3 specific courses, certifications, or books, each with guidance on applying the learning back on the job
 
-Each action item is tagged with the specific skill gaps it addresses.
+Each item has a **title**, a suggested schedule (🗓 Month X–Y), a detailed action description, and skill gap tags. All items are fully independent.
+
+**📄 Export Development Plan**
+After the plan is generated, enter your name and download a structured PDF — includes your profile summary, skill gaps, a 12-month Gantt chart, and the full development plan with coloured sections.
 
 ---
 
 ### 💡 Tips
-- The more detail you provide in your description, the more accurate the skill extraction.
+- The more detail you provide (years of experience, tools used, past projects), the more accurately the system infers your seniority level and tailors the plan.
 - Uploading a full résumé or job description gives better results than a one-line summary.
-- The skill gap is computed programmatically (URI matching), not inferred by the AI — so it's precise.
+- Skill gaps are computed by exact ESCO URI matching — not inferred by AI — so the gap list is precise and auditable.
 """)
 
 # ── Input section ─────────────────────────────────────────────────────────────
@@ -691,68 +1047,50 @@ if analyze_btn:
             with st.expander(f"🔵 Optional ({len(optional)})", expanded=False):
                 render_typed_group(optional)
 
-    # ── Step 4: Display ESCO skill lists ──────────────────────────────────────
-    skill_cols = st.columns(2) if has_current else [st.container()]
-
-    if has_current:
-        essential_current = [s for s in current_occ_skills if s["relationType"] == "essential"]
-        with skill_cols[0]:
-            st.subheader(f"Skills for: {current_occ['preferredLabel']}")
-            st.caption(f"{len(essential_current)} essential / {len(current_occ_skills) - len(essential_current)} optional")
-            render_skill_list(current_occ_skills, f"View all {len(current_occ_skills)} skills")
-
+    # ── Step 4: Display ESCO skill list (target role only) ───────────────────
     essential_target = [s for s in target_occ_skills if s["relationType"] == "essential"]
-    target_col = skill_cols[1] if has_current else skill_cols[0]
-    with target_col:
-        st.subheader(f"Skills for: {target_occ['preferredLabel']}")
-        st.caption(f"{len(essential_target)} essential / {len(target_occ_skills) - len(essential_target)} optional")
-        render_skill_list(target_occ_skills, f"View all {len(target_occ_skills)} skills")
+    st.subheader(f"Skills for: {target_occ['preferredLabel']}")
+    st.caption(f"{len(essential_target)} essential / {len(target_occ_skills) - len(essential_target)} optional")
+    render_skill_list(target_occ_skills, f"View all {len(target_occ_skills)} skills")
 
     # ── Step 5: Match user's skills to ESCO ───────────────────────────────────
+    # For each extracted skill, keep ALL ESCO matches above threshold (not just top-1).
+    # Deduplicate by ESCO URI — retain the entry with the highest similarity score.
     user_matched_skills = []
     if extracted_skills:
+        best_by_uri: dict[str, dict] = {}
         with st.spinner("Matching your skills to ESCO vocabulary…"):
             for user_skill in extracted_skills:
-                matches = semantic_search_skills(user_skill, skill_emb, skill_meta, top_k=1)
-                if matches:
-                    esco_skill, score = matches[0]
-                    if score >= SKILL_MATCH_THRESHOLD:
-                        user_matched_skills.append(
-                            {
-                                "user_skill": user_skill,
-                                "esco_label": esco_skill["preferredLabel"],
-                                "esco_uri": esco_skill["conceptUri"],
-                                "skillType": esco_skill["skillType"],
-                                "score": score,
-                            }
-                        )
+                matches = semantic_search_skills(user_skill, skill_emb, skill_meta, top_k=10)
+                for esco_skill, score in matches:
+                    if score < SKILL_MATCH_THRESHOLD:
+                        break  # results are sorted descending; no need to check further
+                    uri = esco_skill["conceptUri"]
+                    if uri not in best_by_uri or score > best_by_uri[uri]["score"]:
+                        best_by_uri[uri] = {
+                            "user_skill": user_skill,
+                            "esco_label": esco_skill["preferredLabel"],
+                            "esco_uri": uri,
+                            "skillType": esco_skill["skillType"],
+                            "score": score,
+                        }
+        user_matched_skills = list(best_by_uri.values())
 
     # Sort by similarity descending
     user_matched_skills.sort(key=lambda m: m["score"], reverse=True)
 
+    # Annotate whether each matched skill is required by the target role
+    target_skill_uris = {s["skillUri"] for s in target_occ_skills}
+    for m in user_matched_skills:
+        m["in_target"] = m["esco_uri"] in target_skill_uris
+
     # Derive display names for roles (used throughout gap analysis section)
     cur_name = current_occ["preferredLabel"] if current_occ else None
     tgt_name = target_occ["preferredLabel"]
-    both_name = f"{cur_name} + {tgt_name}" if cur_name else tgt_name
 
-    # Annotate each matched skill with which role(s) it appears in
-    current_skill_uris = {s["skillUri"] for s in current_occ_skills}
-    target_skill_uris = {s["skillUri"] for s in target_occ_skills}
-    for m in user_matched_skills:
-        in_cur = m["esco_uri"] in current_skill_uris
-        in_tgt = m["esco_uri"] in target_skill_uris
-        if in_cur and in_tgt:
-            m["in_roles"] = both_name
-        elif in_cur:
-            m["in_roles"] = cur_name
-        elif in_tgt:
-            m["in_roles"] = tgt_name
-        else:
-            m["in_roles"] = "—"
-
-    # ── Step 6: Programmatic gap computation ──────────────────────────────────
+    # ── Step 6: Programmatic gap computation (target role only) ──────────────
     gap_skills = compute_gap_merged(
-        user_matched_skills, current_occ_skills, target_occ_skills,
+        user_matched_skills, [], target_occ_skills,
         current_name=cur_name or "current role",
         target_name=tgt_name,
     )
@@ -773,16 +1111,16 @@ if analyze_btn:
     )
     if user_matched_skills:
         with st.expander(f"View {len(user_matched_skills)} matched skill(s)", expanded=False):
-            h1, h2, h3, h4 = st.columns([3, 3, 2, 1])
+            h1, h2, h3, h4 = st.columns([3, 3, 1, 1])
             h1.markdown("**Your description**")
             h2.markdown("**ESCO skill**")
-            h3.markdown("**In role**")
+            h3.markdown("**Required**")
             h4.markdown("**Sim.**")
             for m in user_matched_skills:
-                c1, c2, c3, c4 = st.columns([3, 3, 2, 1])
+                c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
                 c1.markdown(f"`{m['user_skill']}`")
                 c2.markdown(m["esco_label"])
-                c3.markdown(m["in_roles"])
+                c3.markdown("✅" if m["in_target"] else "—")
                 c4.markdown(f"`{m['score']:.2f}`")
     else:
         st.info(f"No skills from your profile could be matched above the threshold ({SKILL_MATCH_THRESHOLD}).")
@@ -793,31 +1131,11 @@ if analyze_btn:
         f"{len(gap_essential)} essential gap(s)  ·  {len(gap_optional)} optional gap(s)  "
         f"— target skills not found in your matched profile"
     )
-    # Source ordering and icons use actual role names resolved above
-    source_order = (
-        [cur_name, tgt_name, both_name] if cur_name else [tgt_name]
-    )
-    source_icon = {
-        cur_name: "👤",
-        tgt_name: "🎯",
-        both_name: "👥",
-    }
-
     def render_gap_section(skills: list[dict], relation_label: str, relation_icon: str, expanded: bool = True):
         if not skills:
             return
-        by_source: dict[str, list[dict]] = {}
-        for s in skills:
-            by_source.setdefault(s["source"], []).append(s)
         with st.expander(f"{relation_icon} {relation_label} ({len(skills)})", expanded=expanded):
-            for source in source_order:
-                items_in_source = by_source.get(source, [])
-                if not items_in_source:
-                    continue
-                icon = source_icon.get(source, "•")
-                st.markdown(f"**{icon} {source}** ({len(items_in_source)})")
-                render_typed_group(items_in_source)
-                st.markdown("")  # spacer between sources
+            render_typed_group(skills)
 
     if gap_skills:
         render_gap_section(gap_essential, "Essential (must-have)", "🔴", expanded=True)
@@ -854,21 +1172,22 @@ if analyze_btn:
                 return
             st.markdown(f"#### {header}")
             for item in items:
-                action = item.get("action", "")
+                title     = item.get("title", "")
+                action    = item.get("action", "")
                 addresses = [a for a in item.get("addresses", []) if a in gap_label_set]
-                schedule = item.get("schedule", "")
-                # Schedule chip + action text on same line
+                schedule  = item.get("schedule", "")
                 schedule_chip = (
                     f'<span style="display:inline-block;border:1px solid rgba(128,128,128,0.4);'
                     f'border-radius:4px;padding:1px 8px;margin-right:8px;font-size:0.8em;'
                     f'opacity:0.75">🗓 {schedule}</span>'
                     if schedule else ""
                 )
+                title_html = f'<strong style="font-size:1em">{title}</strong>' if title else ""
                 st.markdown(
-                    f'<div style="margin:8px 0 2px 0">{schedule_chip}<strong style="font-size:0.95em"></strong></div>',
+                    f'<div style="margin:12px 0 3px 0">{schedule_chip}{title_html}</div>',
                     unsafe_allow_html=True,
                 )
-                st.markdown(f"  {action}")
+                st.markdown(action)
                 if addresses:
                     badge_html = " ".join(
                         f'<span style="display:inline-block;border:1px solid rgba(78,154,241,0.6);'
@@ -877,7 +1196,7 @@ if analyze_btn:
                         for label in addresses
                     )
                     st.markdown(
-                        f'<div style="margin:-4px 0 8px 0">{badge_html}</div>',
+                        f'<div style="margin:2px 0 10px 0">{badge_html}</div>',
                         unsafe_allow_html=True,
                     )
 
@@ -885,6 +1204,39 @@ if analyze_btn:
         render_plan_section(plan.get("social", []),     "🤝 Social (20%)")
         render_plan_section(plan.get("formal", []),     "📚 Formal (10%)")
 
+        # Store export data in session_state so it survives reruns
+        st.session_state["pdf_export"] = {
+            "current_occ": current_occ,
+            "target_occ": target_occ,
+            "user_matched_skills": user_matched_skills,
+            "gap_essential": gap_essential,
+            "plan": plan,
+            "target_is_inferred": target_is_inferred,
+        }
+
     # Legend
     st.divider()
     st.caption("🔴 Essential skill  |  🔵 Optional skill  |  Similarity scores are cosine similarity (0–1)")
+
+# ── PDF Export (outside analyze block so it survives reruns) ──────────────────
+if "pdf_export" in st.session_state:
+    st.divider()
+    st.markdown("#### 📄 Export Development Plan")
+    export_name = st.text_input(
+        "Your name (for the PDF)",
+        placeholder="e.g. Jane Smith",
+        key="export_name",
+    )
+    if export_name.strip():
+        pdf_bytes = generate_pdf_report(
+            name=export_name.strip(),
+            **st.session_state["pdf_export"],
+        )
+        st.download_button(
+            label="⬇️ Download PDF",
+            data=pdf_bytes,
+            file_name=f"development_plan_{export_name.strip().replace(' ', '_')}.pdf",
+            mime="application/pdf",
+        )
+    else:
+        st.caption("Enter your name above to enable the download button.")
