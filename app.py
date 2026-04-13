@@ -31,7 +31,7 @@ ESCO_DATA_DIR = os.getenv(
 EMBEDDING_MODEL = os.getenv("AZURE_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
 LLM_MODEL = os.getenv("AZURE_LLM_DEPLOYMENT", "gpt-5.4-nano")
 EMBEDDING_DIM = 256
-SKILL_MATCH_THRESHOLD = 0.50
+SKILL_MATCH_THRESHOLD = 0.60
 TOP_OCC_CANDIDATES = 3   # internal: fetch top-N, only best match is displayed
 
 client = AzureOpenAI(
@@ -403,7 +403,7 @@ def generate_pdf_report(
     plan: dict,
     target_is_inferred: bool = False,
 ) -> bytes:
-    """Generate a styled Career Development Plan PDF using reportlab."""
+    """Generate a styled Individual Development Plan PDF using reportlab."""
     import io as _io
     from datetime import date
     from reportlab.lib.pagesizes import A4
@@ -415,6 +415,32 @@ def generate_pdf_report(
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
         PageBreak, KeepTogether, HRFlowable,
     )
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    # ── Register CJK-compatible font ─────────────────────────────────────────
+    _FONT_NAME = "NotoSansSC"
+    _font_candidates = [
+        # Bundled font (primary — works on all platforms)
+        os.path.join(os.path.dirname(__file__), "fonts", "NotoSansSC-Regular.ttf"),
+        # Linux system font (Streamlit Community Cloud fallback)
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        # macOS system fallback
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    ]
+    _font_registered = False
+    for _fp in _font_candidates:
+        if os.path.exists(_fp):
+            try:
+                pdfmetrics.registerFont(TTFont(_FONT_NAME, _fp))
+                _font_registered = True
+                break
+            except Exception:
+                continue
+    if not _font_registered:
+        _FONT_NAME = "Helvetica"  # ASCII-only fallback
 
     # ── Palette ───────────────────────────────────────────────────────────────
     C_NAVY   = colors.HexColor("#1e3a5f")
@@ -438,10 +464,10 @@ def generate_pdf_report(
         topMargin=MARGIN, bottomMargin=MARGIN,
     )
 
-    # ── Styles ────────────────────────────────────────────────────────────────
+    # ── Styles (all use CJK-capable font) ────────────────────────────────────
     base = getSampleStyleSheet()
     def sty(name, **kw):
-        return ParagraphStyle(name, parent=base["Normal"], **kw)
+        return ParagraphStyle(name, fontName=_FONT_NAME, **kw)
 
     s_title    = sty("title",   fontSize=22, textColor=C_WHITE, leading=28, alignment=TA_LEFT)
     s_subtitle = sty("sub",     fontSize=10, textColor=C_WHITE, leading=14)
@@ -485,11 +511,13 @@ def generate_pdf_report(
     inferred_note = " (inferred)" if target_is_inferred else ""
 
     # Hero banner
+    s_name = sty("name", fontSize=26, textColor=C_WHITE, leading=32, spaceBefore=4)
     hero_inner = Table([
-        [Paragraph("Career Development Plan", s_title)],
-        [Paragraph(f"{name}  ·  Generated {today}", s_subtitle)],
+        [Paragraph("Individual Development Plan", s_subtitle)],
+        [Paragraph(name, s_name)],
+        [Paragraph(f"Generated {today}", s_subtitle)],
     ], colWidths=[W - 28])
-    story.append(colored_header_table(hero_inner, C_NAVY, padding=20))
+    story.append(colored_header_table(hero_inner, C_NAVY, padding=22))
     story.append(Spacer(1, 16))
 
     # Role transition card
