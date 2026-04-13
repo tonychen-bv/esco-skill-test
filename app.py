@@ -822,7 +822,7 @@ Your input is matched against ~3,000 ESCO occupations using semantic similarity.
 The official ESCO skill list for your matched target occupation, split into **Essential** (must-have) and **Optional** (nice-to-have), grouped by skill type (Knowledge / Skill & Competence / Language).
 
 **✅ Skills You Already Have**
-Your extracted skills matched against the full ESCO skill vocabulary (cosine similarity ≥ 0.50). Each matched skill shows its ESCO label, similarity score, and whether it is required by the target role (**Required ✅**).
+Your extracted skills matched against the full ESCO skill vocabulary (cosine similarity ≥ 0.60). Each matched skill shows its ESCO label, similarity score, and whether it is required by the target role (**Required ✅**).
 
 > ⚠️ Similarity is computed on full ESCO skill embeddings (label + description + scope note), not just the skill name — so even an exact name match will score below 1.0. Multiple ESCO skills above the threshold may be matched per extracted skill; duplicates are deduplicated by URI, keeping the highest score.
 
