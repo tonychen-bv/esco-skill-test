@@ -14,6 +14,7 @@ import json
 import os
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from openai import AzureOpenAI
@@ -22,11 +23,15 @@ load_dotenv()
 
 # ── Config ───────────────────────────────────────────────────────────────────
 EMBEDDINGS_DIR = os.path.join(os.path.dirname(__file__), "esco_embeddings")
+ESCO_DATA_DIR = os.getenv(
+    "ESCO_DATA_DIR",
+    "/Users/tonychen/Downloads/ESCO dataset - v1.2.1 - classification - en - csv",
+)
 EMBEDDING_MODEL = os.getenv("AZURE_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
-LLM_MODEL = os.getenv("AZURE_LLM_DEPLOYMENT", "gpt-4.1-mini")
+LLM_MODEL = os.getenv("AZURE_LLM_DEPLOYMENT", "gpt-5.4-nano")
 EMBEDDING_DIM = 256
 SKILL_MATCH_THRESHOLD = 0.50
-TOP_OCC_CANDIDATES = 3   # show top-N occupation matches for user to confirm
+TOP_OCC_CANDIDATES = 3   # internal: fetch top-N, only best match is displayed
 
 client = AzureOpenAI(
     azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
@@ -85,7 +90,45 @@ def load_esco_data():
     occ_emb = occ_emb / (np.linalg.norm(occ_emb, axis=1, keepdims=True) + 1e-9)
     skill_emb = skill_emb / (np.linalg.norm(skill_emb, axis=1, keepdims=True) + 1e-9)
 
-    return occ_emb, occ_meta, skill_emb, skill_meta, relations
+    # Full occupation detail lookup keyed by conceptUri (for rich metadata display)
+    occ_detail: dict[str, dict] = {}
+    occ_csv_path = os.path.join(ESCO_DATA_DIR, "occupations_en.csv")
+    if os.path.exists(occ_csv_path):
+        occ_df = pd.read_csv(occ_csv_path, usecols=[
+            "conceptUri", "altLabels", "definition", "scopeNote", "description",
+        ])
+        for _, row in occ_df.iterrows():
+            occ_detail[str(row["conceptUri"])] = {
+                "altLabels": str(row["altLabels"]).strip() if pd.notna(row["altLabels"]) else "",
+                "definition": str(row["definition"]).strip() if pd.notna(row["definition"]) else "",
+                "scopeNote": str(row["scopeNote"]).strip() if pd.notna(row["scopeNote"]) else "",
+                "description": str(row["description"]).strip() if pd.notna(row["description"]) else "",
+            }
+
+    return occ_emb, occ_meta, skill_emb, skill_meta, relations, occ_detail
+
+
+# ── UI helpers ────────────────────────────────────────────────────────────────
+def render_occ_match(occ: dict, score: float, detail: dict):
+    """Display a single best-match occupation card with full metadata."""
+    st.markdown(f"### {occ['preferredLabel']}")
+    st.caption(f"Similarity score: `{score:.3f}`")
+
+    if detail.get("altLabels"):
+        st.markdown("**Also known as**")
+        st.caption(detail["altLabels"].replace("\n", " · "))
+
+    if detail.get("definition"):
+        st.markdown("**Definition**")
+        st.markdown(detail["definition"])
+
+    if detail.get("description"):
+        st.markdown("**Description**")
+        st.markdown(detail["description"])
+
+    if detail.get("scopeNote"):
+        st.markdown("**Scope note**")
+        st.caption(detail["scopeNote"])
 
 
 # ── Azure helpers ─────────────────────────────────────────────────────────────
@@ -180,7 +223,7 @@ Example output: Software Architect"""
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
-        max_tokens=20,
+        max_completion_tokens=20,
     )
     return resp.choices[0].message.content.strip()
 
@@ -227,29 +270,30 @@ def compute_gap_merged(
     return gap
 
 
-def llm_learning_recommendations(
+def llm_development_plan(
     target_occ: dict,
-    gap_skills: list[dict],
+    essential_gaps: list[dict],
     user_matched_skills: list[dict],
     current_occ: dict | None = None,
     target_is_inferred: bool = False,
-) -> str:
-    """Generate prioritized learning recommendations based on the pre-computed gap."""
+) -> dict:
+    """
+    Generate a 70-20-10 development plan focused on essential skill gaps.
 
-    def fmt_gap(skills: list[dict], max_n: int = 40) -> str:
-        essential = [s for s in skills if s.get("relationType") == "essential"][:max_n]
-        optional = [s for s in skills if s.get("relationType") != "essential"][:max_n]
-        lines = []
-        for s in essential:
-            lines.append(f"  - {s['skillLabel']} [ESSENTIAL]")
-        for s in optional:
-            lines.append(f"  - {s['skillLabel']} [optional]")
-        return "\n".join(lines) if lines else "  (no gaps — user already covers all target skills)"
-
+    Returns a dict:
+    {
+      "experience": [{"action": str, "addresses": [skill_label, ...]}, ...],
+      "social":     [...],
+      "formal":     [...],
+    }
+    """
     def fmt_have(matched: list[dict]) -> str:
         if not matched:
             return "  (none — starting from scratch)"
         return "\n".join(f"  - {m['esco_label']} (from: \"{m['user_skill']}\")" for m in matched)
+
+    gap_labels = [s["skillLabel"] for s in essential_gaps[:30]]
+    gap_list = "\n".join(f'  - "{label}"' for label in gap_labels)
 
     current_context = (
         f"Currently works as: {current_occ.get('preferredLabel', 'unknown')}"
@@ -258,28 +302,60 @@ def llm_learning_recommendations(
     )
     inferred_note = " (inferred next step)" if target_is_inferred else ""
 
-    prompt = f"""You are an expert career development advisor.
+    prompt = f"""You are an expert career development advisor using the 70-20-10 development model.
 
 Context:
 - {current_context}
 - Target role{inferred_note}: {target_occ.get('preferredLabel', 'Unknown')}
 
-Skills the user already has (matched to ESCO):
+Skills the user already has:
 {fmt_have(user_matched_skills)}
 
-Skill gaps (target role requires these, not in user's profile):
-{fmt_gap(gap_skills)}
+Essential skill gaps (use EXACTLY these labels when referencing skills in your output):
+{gap_list}
 
-Provide 3-5 concrete, prioritized **Learning Recommendations** to bridge the gap.
-Focus on [ESSENTIAL] gaps first. Be specific and actionable. Use bullet points."""
+Create a development plan with three sections: experience, social, formal.
+Each section has 3–5 action items. Each item MUST reference one or more skills from the gap list above using their exact labels.
+Focus on the most impactful gaps — you do not need to cover every gap in every section.
+
+Return ONLY a JSON object with this exact structure (no markdown, no extra text):
+{{
+  "experience": [
+    {{"action": "...", "addresses": ["exact skill label", ...]}},
+    ...
+  ],
+  "social": [
+    {{"action": "...", "addresses": ["exact skill label", ...]}},
+    ...
+  ],
+  "formal": [
+    {{"action": "...", "addresses": ["exact skill label", ...]}},
+    ...
+  ]
+}}
+
+experience: on-the-job projects, stretch assignments, or responsibilities to seek.
+social: mentors to find, communities to join, shadowing or peer-learning approaches.
+formal: specific courses, certifications, books, or platforms (name actual resources).
+
+Rules for "action" text:
+- Write 3–5 sentences of substantive, expert-level guidance — not a one-liner.
+- Be specific and professional: explain what exactly to do, how to approach it, what good execution looks like, and what outcome or competency gain to expect.
+- Tailor the depth to someone who is serious about career growth and can handle nuanced advice.
+- Do NOT mention skill names, do NOT include phrases like "to improve X", "to develop Y", "in order to build Z", or any reference to which skill is being addressed. The skill mapping is shown separately as tags."""
 
     resp = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
         temperature=0.3,
-        max_tokens=800,
+        max_completion_tokens=2500,
     )
-    return resp.choices[0].message.content
+    try:
+        return json.loads(resp.choices[0].message.content)
+    except (json.JSONDecodeError, KeyError):
+        # Fallback: return empty structure so UI doesn't crash
+        return {"experience": [], "social": [], "formal": []}
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -295,15 +371,67 @@ if not os.path.exists(os.path.join(EMBEDDINGS_DIR, "occupations_embeddings.npy")
     )
     st.stop()
 
-occ_emb, occ_meta, skill_emb, skill_meta, relations = load_esco_data()
+occ_emb, occ_meta, skill_emb, skill_meta, relations, occ_detail = load_esco_data()
+
+# ── README / Guide ────────────────────────────────────────────────────────────
+with st.expander("📖 How to use this tool", expanded=False):
+    st.markdown("""
+## Welcome to the ESCO Skill Gap Analyzer
+
+This tool helps you understand where you stand today and what it takes to reach your next career goal — powered by the **ESCO v1.2.1** European Skills/Competences taxonomy and **Azure OpenAI**.
+
+---
+
+### ✍️ How to fill in the inputs
+
+You can use **either or both** input fields. Each mode produces different output:
+
+| Mode | What you fill in | What you get |
+|------|-----------------|--------------|
+| **Current only** | Your current role & skills | System infers your most natural next career step, then runs a full gap analysis toward it |
+| **Target only** | The role you want to reach | A complete skill roadmap starting from scratch — no current profile needed |
+| **Both** | Current + target | A precise gap analysis comparing where you are to where you want to be |
+
+You can type a free-text description **or upload a PDF / DOCX file** (e.g. your résumé for Current, a job description for Target).
+
+---
+
+### 📦 What each output section means
+
+**🔍 Extracted Information**
+What the AI parsed from your input — your current job title, extracted skills list, and/or target title. Review this to confirm the AI understood your input correctly.
+
+**🏷 Current / Target Role Match**
+Your input is matched against all ~3,000 ESCO occupations using semantic similarity. The best-matching ESCO occupation is shown with its official definition, description, alternative labels, and scope note.
+
+**📋 Skills for [Role]**
+The official ESCO skill list for each matched occupation, split into **Essential** (must-have) and **Optional** (nice-to-have), further grouped by skill type (Knowledge / Skill & Competence / Language).
+
+**✅ Skills You Already Have**
+Your extracted skills matched against the full ESCO skill vocabulary (threshold ≥ 0.50 cosine similarity). Shows which ESCO skill each of your skills maps to, and whether it appears in your current role, target role, or both.
+
+> ⚠️ Scores are computed on full ESCO skill embeddings (label + description + scope note), so even an exact name match will score below 1.0.
+
+**❌ Skill Gaps**
+Skills required by your current and/or target role that are **not** found in your matched profile — the actual gap you need to close. Grouped by Essential / Optional → role source → skill type.
+
+**🗺 Development Plan**
+A personalised **70-20-10** learning plan to close your essential skill gaps:
+- 🛠 **Experience (70%)** — on-the-job projects and stretch assignments
+- 🤝 **Social (20%)** — mentors, communities, peer learning
+- 📚 **Formal (10%)** — courses, certifications, books, platforms
+
+Each action item is tagged with the specific skill gaps it addresses.
+
+---
+
+### 💡 Tips
+- The more detail you provide in your description, the more accurate the skill extraction.
+- Uploading a full résumé or job description gives better results than a one-line summary.
+- The skill gap is computed programmatically (URI matching), not inferred by the AI — so it's precise.
+""")
 
 # ── Input section ─────────────────────────────────────────────────────────────
-st.info(
-    "Fill in **at least one** field.  \n"
-    "- **Current only** → the system infers your natural next career step  \n"
-    "- **Target only** → shows a full skill roadmap starting from scratch  \n"
-    "- **Both** → gap analysis between your current profile and target role"
-)
 
 col1, col2 = st.columns(2)
 
@@ -429,12 +557,8 @@ if analyze_btn:
         current_occ_skills = relations.get(current_occ["conceptUri"], [])
 
         st.subheader("Current Role Match")
-        for i, (occ, score) in enumerate(current_occ_candidates):
-            label = "✅ Best match" if i == 0 else f"Alternative {i}"
-            st.markdown(f"**{label}** — {occ['preferredLabel']} `sim: {score:.3f}`")
-            st.caption(f"ISCO Group: {occ.get('iscoGroup', 'N/A')}  |  Code: {occ.get('code', 'N/A')}")
-            if i == 0:
-                st.divider()
+        best_occ, best_score = current_occ_candidates[0]
+        render_occ_match(best_occ, best_score, occ_detail.get(best_occ["conceptUri"], {}))
 
     # ── Step 3: Determine target occupation ───────────────────────────────────
     if has_target:
@@ -459,12 +583,8 @@ if analyze_btn:
     target_occ_skills = relations.get(target_occ["conceptUri"], [])
 
     st.subheader("Target Role Match" + (" *(inferred)*" if target_is_inferred else ""))
-    for i, (occ, score) in enumerate(target_occ_candidates):
-        label = "✅ Best match" if i == 0 else f"Alternative {i}"
-        st.markdown(f"**{label}** — {occ['preferredLabel']} `sim: {score:.3f}`")
-        st.caption(f"ISCO Group: {occ.get('iscoGroup', 'N/A')}  |  Code: {occ.get('code', 'N/A')}")
-        if i == 0:
-            st.divider()
+    best_tgt, best_tgt_score = target_occ_candidates[0]
+    render_occ_match(best_tgt, best_tgt_score, occ_detail.get(best_tgt["conceptUri"], {}))
 
     # ── Shared display constants ───────────────────────────────────────────────
     N_COLS = 3
@@ -506,29 +626,29 @@ if analyze_btn:
             unsafe_allow_html=True,
         )
 
-    def render_skill_list(skills: list[dict], title: str):
-        """Grouped skill list inside an expander: essential/optional → skillType → 3-col grid."""
+    def render_typed_group(group: list[dict]):
+        """Render a skillType-grouped 3-col grid (shared by skill list and gap section)."""
+        by_type: dict[str, list] = {}
+        for s in group:
+            by_type.setdefault(normalize_type(s["skillType"]), []).append(s)
+        for skill_type, items in sort_types(by_type):
+            skill_type_header(skill_type, len(items))
+            rows = [items[i:i + N_COLS] for i in range(0, len(items), N_COLS)]
+            for row in rows:
+                cols = st.columns(N_COLS)
+                for col, s in zip(cols, row):
+                    col.markdown(s["skillLabel"])
+
+    def render_skill_list(skills: list[dict], _title: str):
+        """Two separate expanders (Essential / Optional) — avoids Streamlit nested expander limit."""
         essential = [s for s in skills if s["relationType"] == "essential"]
         optional = [s for s in skills if s["relationType"] != "essential"]
-        with st.expander(title, expanded=False):
-            for rel_label, rel_icon, group in [
-                ("Essential", "🔴", essential),
-                ("Optional", "🔵", optional),
-            ]:
-                if not group:
-                    continue
-                st.markdown(f"**{rel_icon} {rel_label} ({len(group)})**")
-                by_type: dict[str, list] = {}
-                for s in group:
-                    by_type.setdefault(normalize_type(s["skillType"]), []).append(s)
-                for skill_type, items in sort_types(by_type):
-                    skill_type_header(skill_type, len(items))
-                    rows = [items[i:i + N_COLS] for i in range(0, len(items), N_COLS)]
-                    for row in rows:
-                        cols = st.columns(N_COLS)
-                        for col, s in zip(cols, row):
-                            col.markdown(s["skillLabel"])
-                st.markdown("")  # spacer between essential/optional
+        if essential:
+            with st.expander(f"🔴 Essential ({len(essential)})", expanded=False):
+                render_typed_group(essential)
+        if optional:
+            with st.expander(f"🔵 Optional ({len(optional)})", expanded=False):
+                render_typed_group(optional)
 
     # ── Step 4: Display ESCO skill lists ──────────────────────────────────────
     skill_cols = st.columns(2) if has_current else [st.container()]
@@ -642,48 +762,69 @@ if analyze_btn:
         both_name: "👥",
     }
 
-    def render_gap_section(skills: list[dict], relation_label: str, relation_icon: str):
+    def render_gap_section(skills: list[dict], relation_label: str, relation_icon: str, expanded: bool = True):
         if not skills:
             return
         by_source: dict[str, list[dict]] = {}
         for s in skills:
             by_source.setdefault(s["source"], []).append(s)
-        with st.expander(f"{relation_icon} {relation_label} ({len(skills)})", expanded=True):
+        with st.expander(f"{relation_icon} {relation_label} ({len(skills)})", expanded=expanded):
             for source in source_order:
                 items_in_source = by_source.get(source, [])
                 if not items_in_source:
                     continue
                 icon = source_icon.get(source, "•")
                 st.markdown(f"**{icon} {source}** ({len(items_in_source)})")
-                by_type: dict[str, list[dict]] = {}
-                for s in items_in_source:
-                    by_type.setdefault(normalize_type(s["skillType"]), []).append(s)
-                for skill_type, type_items in sort_types(by_type):
-                    skill_type_header(skill_type, len(type_items))
-                    rows = [type_items[i:i + N_COLS] for i in range(0, len(type_items), N_COLS)]
-                    for row in rows:
-                        cols = st.columns(N_COLS)
-                        for col, s in zip(cols, row):
-                            col.markdown(s["skillLabel"])
+                render_typed_group(items_in_source)
                 st.markdown("")  # spacer between sources
 
     if gap_skills:
-        render_gap_section(gap_essential, "Essential (must-have)", "🔴")
-        render_gap_section(gap_optional, "Optional (nice-to-have)", "🔵")
+        render_gap_section(gap_essential, "Essential (must-have)", "🔴", expanded=True)
+        render_gap_section(gap_optional, "Optional (nice-to-have)", "🔵", expanded=False)
     else:
         st.success("No skill gaps detected — your profile already covers all target role skills!")
 
-    # Learning Recommendations
-    st.markdown("### 📚 Learning Recommendations")
-    with st.spinner("Generating recommendations…"):
-        recommendations = llm_learning_recommendations(
-            target_occ=target_occ,
-            gap_skills=gap_skills,
-            user_matched_skills=user_matched_skills,
-            current_occ=current_occ,
-            target_is_inferred=target_is_inferred,
-        )
-    st.markdown(recommendations)
+    # Development Plan
+    st.markdown("### 🗺 Development Plan")
+    st.caption("Based on essential skill gaps only · structured as Experience / Social / Formal (70-20-10)")
+    if not gap_essential:
+        st.success("No essential skill gaps — no development plan needed!")
+    else:
+        with st.spinner("Generating development plan…"):
+            plan = llm_development_plan(
+                target_occ=target_occ,
+                essential_gaps=gap_essential,
+                user_matched_skills=user_matched_skills,
+                current_occ=current_occ,
+                target_is_inferred=target_is_inferred,
+            )
+
+        # Build a set of valid gap labels for badge validation
+        gap_label_set = {s["skillLabel"] for s in gap_essential}
+
+        def render_plan_section(items: list[dict], header: str):
+            if not items:
+                return
+            st.markdown(f"#### {header}")
+            for item in items:
+                action = item.get("action", "")
+                addresses = [a for a in item.get("addresses", []) if a in gap_label_set]
+                st.markdown(f"- {action}")
+                if addresses:
+                    badge_html = " ".join(
+                        f'<span style="display:inline-block;border:1px solid rgba(78,154,241,0.6);'
+                        f'color:#4e9af1;border-radius:4px;padding:1px 7px;margin:1px;font-size:0.78em">'
+                        f'{label}</span>'
+                        for label in addresses
+                    )
+                    st.markdown(
+                        f'<div style="margin:-6px 0 6px 20px">{badge_html}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        render_plan_section(plan.get("experience", []), "🛠 Experience (70%)")
+        render_plan_section(plan.get("social", []),     "🤝 Social (20%)")
+        render_plan_section(plan.get("formal", []),     "📚 Formal (10%)")
 
     # Legend
     st.divider()
