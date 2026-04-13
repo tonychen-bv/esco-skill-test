@@ -1,5 +1,5 @@
 """
-app.py — ESCO Skill Gap Analyzer (Streamlit UI)
+app.py — Individual Development Planner (Streamlit UI)
 
 Prerequisites:
     1. Run embed_esco.py first to generate esco_embeddings/
@@ -773,8 +773,8 @@ def generate_pdf_report(
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="ESCO Skill Gap Analyzer", page_icon="🎯", layout="wide")
-st.title("🎯 ESCO Skill Gap Analyzer")
+st.set_page_config(page_title="Individual Development Planner", page_icon="🎯", layout="wide")
+st.title("🎯 Individual Development Planner")
 st.caption("Powered by ESCO v1.2.1 + Azure OpenAI")
 
 # Check embeddings exist
@@ -790,7 +790,7 @@ occ_emb, occ_meta, skill_emb, skill_meta, relations, occ_detail = load_esco_data
 # ── README / Guide ────────────────────────────────────────────────────────────
 with st.expander("📖 How to use this tool", expanded=False):
     st.markdown("""
-## Welcome to the ESCO Skill Gap Analyzer
+## Welcome to the Individual Development Planner
 
 This tool helps you understand what skills you need to reach your target role — and delivers a concrete, personalised development plan to get there. Powered by the **ESCO v1.2.1** European Skills/Competences taxonomy and **Azure OpenAI**.
 
