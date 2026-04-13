@@ -93,18 +93,10 @@ def load_esco_data():
 
     # Full occupation detail lookup keyed by conceptUri (for rich metadata display)
     occ_detail: dict[str, dict] = {}
-    occ_csv_path = os.path.join(ESCO_DATA_DIR, "occupations_en.csv")
-    if os.path.exists(occ_csv_path):
-        occ_df = pd.read_csv(occ_csv_path, usecols=[
-            "conceptUri", "altLabels", "definition", "scopeNote", "description",
-        ])
-        for _, row in occ_df.iterrows():
-            occ_detail[str(row["conceptUri"])] = {
-                "altLabels": str(row["altLabels"]).strip() if pd.notna(row["altLabels"]) else "",
-                "definition": str(row["definition"]).strip() if pd.notna(row["definition"]) else "",
-                "scopeNote": str(row["scopeNote"]).strip() if pd.notna(row["scopeNote"]) else "",
-                "description": str(row["description"]).strip() if pd.notna(row["description"]) else "",
-            }
+    detail_path = os.path.join(EMBEDDINGS_DIR, "occupations_detail.json")
+    if os.path.exists(detail_path):
+        with open(detail_path, encoding="utf-8") as f:
+            occ_detail = json.load(f)
 
     return occ_emb, occ_meta, skill_emb, skill_meta, relations, occ_detail
 

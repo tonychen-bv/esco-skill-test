@@ -187,6 +187,29 @@ def main():
             json.dump(relations, f, ensure_ascii=False)
         print(f"  Saved relations for {len(relations)} occupations → {rel_path}")
 
+    # ── 4. Occupation Detail (for rich UI display) ────────────────────────────
+    detail_path = os.path.join(OUTPUT_DIR, "occupations_detail.json")
+
+    if os.path.exists(detail_path):
+        print("Occupation detail already exists — skipping.")
+    else:
+        print("Loading occupations_en.csv for detail extraction...")
+        occ_detail_df = pd.read_csv(
+            os.path.join(ESCO_DATA_DIR, "occupations_en.csv"),
+            usecols=["conceptUri", "altLabels", "definition", "scopeNote", "description"],
+        )
+        detail: dict[str, dict] = {}
+        for _, row in occ_detail_df.iterrows():
+            detail[str(row["conceptUri"])] = {
+                "altLabels":   safe_str(row["altLabels"]),
+                "definition":  safe_str(row["definition"]),
+                "scopeNote":   safe_str(row["scopeNote"]),
+                "description": safe_str(row["description"]),
+            }
+        with open(detail_path, "w", encoding="utf-8") as f:
+            json.dump(detail, f, ensure_ascii=False)
+        print(f"  Saved detail for {len(detail)} occupations → {detail_path}")
+
     print("\nDone! All embedding files are ready in:", OUTPUT_DIR)
 
 
