@@ -12,6 +12,7 @@ Run:
 import io
 import json
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -276,9 +277,10 @@ def llm_development_plan(
     user_matched_skills: list[dict],
     current_occ: dict | None = None,
     target_is_inferred: bool = False,
+    user_profile_text: str = "",
 ) -> dict:
     """
-    Generate a 70-20-10 development plan focused on essential skill gaps.
+    Generate a 70-20-10 development plan calibrated to the user's seniority level.
 
     Returns a dict:
     {
@@ -301,60 +303,99 @@ def llm_development_plan(
         else "Starting from scratch (no current role provided)"
     )
     inferred_note = " (inferred next step)" if target_is_inferred else ""
+    profile_snippet = user_profile_text[:1200].strip() if user_profile_text else "(not provided)"
 
     prompt = f"""You are an expert career development advisor using the 70-20-10 development model.
 
-Context:
+## User profile (raw input — use this to infer seniority level)
+{profile_snippet}
+
+## Structured context
 - {current_context}
 - Target role{inferred_note}: {target_occ.get('preferredLabel', 'Unknown')}
-
-Skills the user already has:
+- Skills the user already has:
 {fmt_have(user_matched_skills)}
 
-Essential skill gaps (use EXACTLY these labels when referencing skills in your output):
+## Essential skill gaps
+(Use EXACTLY these labels when referencing skills in the "addresses" field)
 {gap_list}
 
-Create a development plan with three sections: experience, social, formal.
-Each section has 3–5 action items. Each item MUST reference one or more skills from the gap list above using their exact labels.
-Focus on the most impactful gaps — you do not need to cover every gap in every section.
+---
+
+## Your task
+
+Step 1 — silently infer the user's seniority level (e.g. junior, mid-level, senior, staff, principal) from their profile and existing skills. Every action item must be calibrated to that level in terms of complexity, autonomy, and scope.
+
+Step 2 — generate a development plan across three sections: experience, social, formal.
+- Each item MUST reference one or more skills from the gap list above using their exact labels.
+- Focus on the most impactful gaps — you do not need to cover every gap in every section.
+- Within each section, order items by impact: the item that will give the user the greatest career leverage comes first.
+- Section constraints:
+  - experience: exactly 2 items — one for the first half (Month 1–6) and one for the second half (Month 7–12). Each experience item may span up to 6 months.
+  - social: up to 3 items.
+  - formal: up to 3 items.
+
+Step 3 — assign a realistic schedule to every item:
+- The entire plan must fit within 12 months (Month 1 through Month 12).
+- experience items: first item within Month 1–6, second item within Month 7–12, each up to 6 months long.
+- social and formal items: each takes a maximum of 3 months.
+- All items must be fully independent — no item should require another item to be completed first. Each item must be actionable on its own from day one of its scheduled window.
+- Overlaps between items are allowed, but the total concurrent load must remain achievable — do not schedule more than 2–3 items at the same time across all sections.
+- Express the schedule as "Month X–Y" (e.g. "Month 1–3", "Month 7–12", "Month 4–6").
 
 Return ONLY a JSON object with this exact structure (no markdown, no extra text):
 {{
   "experience": [
-    {{"action": "...", "addresses": ["exact skill label", ...]}},
+    {{"action": "...", "addresses": ["exact skill label", ...], "schedule": "Month X–Y"}},
     ...
   ],
   "social": [
-    {{"action": "...", "addresses": ["exact skill label", ...]}},
+    {{"action": "...", "addresses": ["exact skill label", ...], "schedule": "Month X–Y"}},
     ...
   ],
   "formal": [
-    {{"action": "...", "addresses": ["exact skill label", ...]}},
+    {{"action": "...", "addresses": ["exact skill label", ...], "schedule": "Month X–Y"}},
     ...
   ]
 }}
 
-experience: on-the-job projects, stretch assignments, or responsibilities to seek.
-social: mentors to find, communities to join, shadowing or peer-learning approaches.
-formal: specific courses, certifications, books, or platforms (name actual resources).
+---
 
-Rules for "action" text:
+## Section-specific rules
+
+**experience** — on-the-job projects, stretch assignments, responsibilities to seek:
+- Describe what to do AND what a successful outcome looks like (be concrete: deliverables, decisions made, scope owned, measurable impact).
+- Frame each item around the result the user should be able to demonstrate at the end, not just the activity.
+
+**social** — peer learning, mentorship, community engagement:
+- Focus on the specific competency the user should gain through the interaction, not the activity itself.
+- Describe what kind of person to seek (what they should have done / be able to demonstrate), what to ask or observe, and how to convert the interaction into a lasting capability.
+- Avoid generic advice like "join a community" — instead describe what the user should be able to do differently as a result.
+
+**formal** — courses, certifications, books, structured learning:
+- Name real, specific resources (actual course titles, cert programs, authors, platforms).
+- For each resource, also describe how to apply the learning back into on-the-job experience: what project, task, or responsibility should the user tackle immediately after or alongside the formal learning to cement it.
+
+**General rules for all "action" text:**
 - Write 3–5 sentences of substantive, expert-level guidance — not a one-liner.
-- Be specific and professional: explain what exactly to do, how to approach it, what good execution looks like, and what outcome or competency gain to expect.
-- Tailor the depth to someone who is serious about career growth and can handle nuanced advice.
+- Calibrate complexity and autonomy to the inferred seniority level.
 - Do NOT mention skill names, do NOT include phrases like "to improve X", "to develop Y", "in order to build Z", or any reference to which skill is being addressed. The skill mapping is shown separately as tags."""
 
     resp = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
-        temperature=0.3,
         max_completion_tokens=2500,
     )
+    raw = resp.choices[0].message.content or ""
+    finish_reason = resp.choices[0].finish_reason
     try:
-        return json.loads(resp.choices[0].message.content)
-    except (json.JSONDecodeError, KeyError):
-        # Fallback: return empty structure so UI doesn't crash
+        return json.loads(raw)
+    except (json.JSONDecodeError, KeyError) as e:
+        st.warning(f"⚠️ Development plan parse error: `{e}`")
+        st.caption(f"finish_reason: `{finish_reason}`")
+        with st.expander("Raw LLM response (debug)"):
+            st.text(raw or "(empty)")
         return {"experience": [], "social": [], "formal": []}
 
 
@@ -797,7 +838,13 @@ if analyze_btn:
                 user_matched_skills=user_matched_skills,
                 current_occ=current_occ,
                 target_is_inferred=target_is_inferred,
+                user_profile_text=current_text if has_current else "",
             )
+
+        # Debug: show plan keys if all sections are empty
+        if not any(plan.get(k) for k in ("experience", "social", "formal")):
+            st.warning("⚠️ Development plan returned empty — showing raw response for debugging.")
+            st.json(plan)
 
         # Build a set of valid gap labels for badge validation
         gap_label_set = {s["skillLabel"] for s in gap_essential}
@@ -809,7 +856,19 @@ if analyze_btn:
             for item in items:
                 action = item.get("action", "")
                 addresses = [a for a in item.get("addresses", []) if a in gap_label_set]
-                st.markdown(f"- {action}")
+                schedule = item.get("schedule", "")
+                # Schedule chip + action text on same line
+                schedule_chip = (
+                    f'<span style="display:inline-block;border:1px solid rgba(128,128,128,0.4);'
+                    f'border-radius:4px;padding:1px 8px;margin-right:8px;font-size:0.8em;'
+                    f'opacity:0.75">🗓 {schedule}</span>'
+                    if schedule else ""
+                )
+                st.markdown(
+                    f'<div style="margin:8px 0 2px 0">{schedule_chip}<strong style="font-size:0.95em"></strong></div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(f"  {action}")
                 if addresses:
                     badge_html = " ".join(
                         f'<span style="display:inline-block;border:1px solid rgba(78,154,241,0.6);'
@@ -818,7 +877,7 @@ if analyze_btn:
                         for label in addresses
                     )
                     st.markdown(
-                        f'<div style="margin:-6px 0 6px 20px">{badge_html}</div>',
+                        f'<div style="margin:-4px 0 8px 0">{badge_html}</div>',
                         unsafe_allow_html=True,
                     )
 
